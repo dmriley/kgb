@@ -20,6 +20,14 @@
  * Boston, MA  02110-1301, USA.
  *
  */
+ 
+
+#include <linux/gpio.h>
+#include <mach/gpio-atlas.h>
+
+#include <mach/irqs.h> 
+#include <asm/io.h>
+#include <mach/regs-gpio.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/timer.h>
@@ -27,6 +35,7 @@
 #include <linux/i2c.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/delay.h>
 #include <linux/input.h>
 #include <linux/earlysuspend.h>
@@ -42,6 +51,10 @@
 
 #define OLD_BACKLIGHT_ON	0x1
 #define OLD_BACKLIGHT_OFF	0x2
+
+// touchkey interrupt filter
+extern const unsigned long touch_int_flt_width;
+void touch_key_set_int_flt( unsigned long width );
 
 #define DEVICE_NAME "cypress-touchkey"
 
@@ -78,6 +91,43 @@ struct cypress_touchkey_devdata {
 	bool	has_legacy_keycode;
 	bool	is_sleeping;
 };
+
+//  struct i2c_client {
+//  	unsigned short flags;		/* div., see below		*/
+//  	unsigned short addr;		/* chip address - NOTE: 7bit	*/
+//  					/* addresses are stored in the	*/
+//  					/* _LOWER_ 7 bits		*/
+//  	char name[I2C_NAME_SIZE];
+//  	struct i2c_adapter *adapter;	/* the adapter we sit on	*/
+//  	struct i2c_driver *driver;	/* and our access routines	*/
+//  	struct device dev;		/* the device structure		*/
+//  	int irq;			/* irq issued by device		*/
+//  	struct list_head detected;
+//  };
+
+//struct i2c_adapter {
+//	struct module *owner;
+//	unsigned int id;
+//	unsigned int class;		  /* classes to allow probing for */
+//	const struct i2c_algorithm *algo; /* the algorithm to access the bus */
+//	void *algo_data;
+//
+//	/* data fields that are valid for all devices	*/
+//	struct rt_mutex bus_lock;
+//
+//	int timeout;			/* in jiffies */
+//	int retries;
+//	struct device dev;		/* the adapter device */
+//
+//	int nr;
+//	char name[48];
+//	struct completion dev_released;
+//
+//	struct list_head userspace_clients;
+//};
+
+static int interrupt_handle_count = 0;
+static u8 read_byte = 0;
 
 static int i2c_touchkey_read_byte(struct cypress_touchkey_devdata *devdata, u8 *val) {
 	int ret;
@@ -177,11 +227,13 @@ static int recovery_routine(struct cypress_touchkey_devdata *devdata) {
 
 	while (retry--) {
 		devdata->pdata->touchkey_onoff(TOUCHKEY_OFF);
+		
 		devdata->pdata->touchkey_onoff(TOUCHKEY_ON);
 		ret = i2c_touchkey_read_byte(devdata, &data);
 		if (!ret) {
 			if (!devdata->is_sleeping)
 				enable_irq(irq_eint);
+				touch_key_set_int_flt( touch_int_flt_width );
 			goto out;
 		}
 		dev_err(&devdata->client->dev, "%s: i2c transfer error retry = %d\n", __func__, retry);
@@ -197,6 +249,22 @@ out:
 
 	return ret;
 }
+//// these two are from chip.c call them there. 
+//void mask_irq(struct irq_desc *desc, int irq)
+//{
+//	if (desc->chip->mask) {
+//		desc->chip->mask(irq);
+//		desc->status |= IRQ_MASKED;
+//	}
+//}
+//
+//void unmask_irq(struct irq_desc *desc, int irq)
+//{
+//	if (desc->chip->unmask) {
+//		desc->chip->unmask(irq);
+//		desc->status &= ~IRQ_MASKED;
+//	}
+//}
 
 extern unsigned int touch_state_val;
 extern void TSP_forced_release(void);
@@ -204,30 +272,83 @@ extern void TSP_forced_release(void);
 static irqreturn_t touchkey_interrupt_thread(int irq, void *touchkey_devdata) {
 	u8 data;
 	int i;
-	int ret;
+	int ret = 0;
 	int scancode;
 	struct cypress_touchkey_devdata *devdata = touchkey_devdata;
-
+	static u8 last_data;
+	static unsigned long thread_count = 0;
+  struct irq_desc *desc = irq_to_desc(irq);
+  
+  thread_count++;
+  		
+	/* the stuff to try and filter out the rfi/emi generated interrupts */
+  for(i=0;i<5;i++){
+    ret += gpio_get_value(_3_GPIO_TOUCH_INT);
+  }
+  
+	// if the input pin is not zero then it wasn't really an int from the chip. ignore the int. 
+  if(ret){ 
+  	printk("%s:%d ignoring bad interrupt with _3_GPIO_TOUCH_INT = %01x; thread_count = %u\n", __func__,  __LINE__, ret, thread_count);
+    printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x; interrupt_handle_count = %d; thread_count = %u\n",
+           __func__,  __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), interrupt_handle_count, thread_count );
+    // interrupt re-enable
+		desc->status &= ~(IRQ_MASKED | IRQ_ONESHOT);
+		desc->chip->unmask(irq);
+    printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\nif(ret) touchkey \n",__func__, __LINE__, desc->status & IRQ_ONESHOT);
+    return IRQ_HANDLED;
+  }
+  // read the byte from the cypress cip
 	ret = i2c_touchkey_read_byte(devdata, &data);
-	if (ret || (data & ESD_STATE_MASK)) {
+
+  
+  // valid values are 1,2,3,4 for key down & 9, a, b, c for key up
+  switch(data){
+    case 0x1: case 0x2: case 0x3: case 0x4: case 0x9: case 0xa: case 0xb: case 0xc:
+      goto PROCESS;
+    default:
+      // the risk is that emi caused a valid keypress to be read wrong and now we're ignoring it.  
+  	  printk("%s:%d bad i2c read data: %02x; thread_count = %u\n", __func__,  __LINE__, data, thread_count);
+  	    //print out value of  S5PV210_GPJ4_INT_FLTCON0     
+      printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x; interrupt_handle_count = %d thread_count = %u\n",
+             __func__, __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), interrupt_handle_count, thread_count );
+      
+      // if the last event was key down then this may have been a key up event with damaged data.
+      // if a valid read and the value is not all 1 or 0 then correct the data to be the key up value.
+      if ((data != 0) && (data != 255)){
+        if (last_data < devdata->pdata->keycode_cnt + 1){
+          data = last_data + UPDOWN_EVENT_MASK;
+          printk("%s:%d override data with value = %02x; thread_count = %u\n", __func__, __LINE__, data, thread_count);
+          goto PROCESS;
+        } 
+        
+      } 
+      printk("%s:%d bad data ignore touchkey \n",__func__, __LINE__);
+      goto exit_thread;
+    
+  }
+PROCESS:
+	printk("%s:%d processing touchkey value %02x with last value %02x; thread_count = %u\n", __func__,  __LINE__, data, last_data, thread_count);
+	
+	// normal thread code from here down
+	
+/*	if (ret || (data & ESD_STATE_MASK)) {
 		ret = recovery_routine(devdata);
+		printk("%s:%d recovery_routine returned %d; thread_count = %u\n", __func__,  __LINE__, ret, thread_count);
 		if (ret) {
 			dev_err(&devdata->client->dev, "%s: touchkey recovery failed!\n", __func__);
 			goto err;
 		}
-	}
-
+	}*/
+	
 	if (devdata->has_legacy_keycode) {
 		scancode = (data & SCANCODE_MASK) - 1;
 		if (scancode < 0 || scancode >= devdata->pdata->keycode_cnt) {
 			dev_err(&devdata->client->dev, "%s: scancode is out of range\n", __func__);
-			goto err;
+			goto exit_thread;
 		}
-
 		/* Don't send down event while the touch screen is being pressed
 		 * to prevent accidental touch key hit.
 		 */
-
 		if (!touch_state_val && scancode == 1)
 			TSP_forced_release();
 
@@ -241,17 +362,53 @@ static irqreturn_t touchkey_interrupt_thread(int irq, void *touchkey_devdata) {
 
 	input_sync(devdata->input_dev);
 	bl_set_timeout();
+	
 err:
+	// keep a copy of the data for next time. 
+	last_data = data;
+	// interrupt re-enable
+  //touch_key_set_int_flt( touch_int_flt_width );
+exit_thread:  
+		desc->status &= ~(IRQ_MASKED | IRQ_ONESHOT);
+    desc->chip->unmask(irq);
+    printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\n",__func__, __LINE__, desc->status & IRQ_ONESHOT);
+	
 	return IRQ_HANDLED;
 }
 
 static irqreturn_t touchkey_interrupt_handler(int irq, void *touchkey_devdata) {
 	struct cypress_touchkey_devdata *devdata = touchkey_devdata;
+	u8 data;
+	int i;
+	int ret = 0;
+  struct irq_desc *desc = irq_to_desc(irq);
+  interrupt_handle_count++;
+  
+  for(i=0;i<5;i++){
+    ret += gpio_get_value(_3_GPIO_TOUCH_INT);
+  }
+	// if the input pin is not zero then it wasn't really an int from the chip. ignore the int. 
+  if(ret){ 
+	  printk("%s:%d ignoring bad interrupt with _3_GPIO_TOUCH_INT = %d\n", __func__,  __LINE__,ret);
+    printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x; interrupt_handle_count = %d\n", __func__, __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), interrupt_handle_count );
+    // it's possible that the interrupt happened just after the unmask in the thread with a bad keycode or bad interrupt. 
+    // need to clear oneshot
+		desc->status &= ~(IRQ_MASKED | IRQ_ONESHOT);
+    printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\n",__func__, __LINE__, desc->status & IRQ_ONESHOT);
+     
+    return IRQ_HANDLED;
+  }
 
 	if (devdata->is_powering_on) {
 		dev_dbg(&devdata->client->dev, "%s: ignoring spurious boot interrupt\n", __func__);
+		desc->status &= ~(IRQ_MASKED | IRQ_ONESHOT);
 		return IRQ_HANDLED;
 	}
+  
+  // the irq thread will run. let it re-enable the interrupt when done. 
+  printk("%s:%d desc->status |= IRQ_ONESHOT\n", __func__,  __LINE__);
+  desc->status |= IRQ_ONESHOT;
+  printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\n",__func__,  __LINE__, desc->status & IRQ_ONESHOT);
 
 	return IRQ_WAKE_THREAD;
 }
@@ -360,6 +517,7 @@ static void cypress_touchkey_early_resume(struct early_suspend *h)
 
 	devdata->is_dead = false;
 	enable_irq(devdata->client->irq);
+	touch_key_set_int_flt( touch_int_flt_width );
 	devdata->is_powering_on = false;
 	devdata->is_sleeping = false;
 
@@ -623,6 +781,11 @@ static int cypress_touchkey_probe(struct i2c_client *client, const struct i2c_de
 	}
 
 	strlcpy(devdata->client->name, DEVICE_NAME, I2C_NAME_SIZE);
+	printk("%s device name = %s\n", __func__, devdata->client->name);
+	printk("%s adapter name = %s\n", __func__, devdata->client->adapter->name);
+	printk("%s adapter nr = %d\n", __func__, devdata->client->adapter->nr);
+	printk("%s IRQ_EINT_GROUP22_BASE = %d\n", __func__, IRQ_EINT_GROUP22_BASE);
+	
 
 	input_dev = input_allocate_device();
 	if (!input_dev) {
@@ -654,11 +817,12 @@ static int cypress_touchkey_probe(struct i2c_client *client, const struct i2c_de
 		if (err >= 0)
 			err = -EIO;
 		dev_err(dev, "%s: error reading hardware version\n", __func__);
+		printk("%s: error reading hardware version\n", __func__);
 		goto err_read;
 	}
 
 	dev_info(dev, "%s: hardware rev1 = %#02x, rev2 = %#02x\n", __func__, data[1], data[2]);
-
+  printk("%s: hardware rev1 = %#02x, rev2 = %#02x\n", __func__, data[1], data[2]);
 #ifdef CONFIG_KEYPAD_CYPRESS_TOUCH_HAS_LEGACY_KEYCODE
 	devdata->has_legacy_keycode = true;
 #else
@@ -683,7 +847,8 @@ static int cypress_touchkey_probe(struct i2c_client *client, const struct i2c_de
 		goto err_backlight_off;
 	}
 
-	err = request_threaded_irq(client->irq, touchkey_interrupt_handler, touchkey_interrupt_thread, IRQF_TRIGGER_FALLING, DEVICE_NAME, devdata);
+//	err = request_threaded_irq(client->irq, touchkey_interrupt_handler, touchkey_interrupt_thread, IRQF_TRIGGER_FALLING | IRQ_ONESHOT, DEVICE_NAME, devdata);
+	err = request_threaded_irq(client->irq, touchkey_interrupt_handler, touchkey_interrupt_thread, IRQF_TRIGGER_LOW, DEVICE_NAME, devdata);
 	if (err) {
 		dev_err(dev, "%s: Can't allocate irq.\n", __func__);
 		goto err_req_irq;
@@ -698,7 +863,7 @@ static int cypress_touchkey_probe(struct i2c_client *client, const struct i2c_de
 	devdata->is_powering_on = false;
 
 	if (misc_register(&bl_led_device))
-		printk("%s misc_register(%s) failed\n", __FUNCTION__, bl_led_device.name);
+		printk("%s:%d misc_register(%s) failed\n", __FUNCTION__, bl_led_device.name);
 	else {
 		bl_devdata = devdata;
 		if (sysfs_create_group(&bl_led_device.this_device->kobj, &bl_led_group) < 0)
@@ -728,7 +893,8 @@ static int cypress_touchkey_probe(struct i2c_client *client, const struct i2c_de
 #endif
 
 	setup_timer(&bl_timer, bl_timer_callback, 0);
-
+  //print out value of  S5PV210_GPJ4_INT_FLTCON0     
+  printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x\n", __func__, __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0) );
 	return 0;
 
 err_req_irq:

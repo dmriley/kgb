@@ -47,6 +47,7 @@
 #include <mach/param.h>
 #include <mach/system.h>
 #include <mach/sec_switch.h>
+#include <mach/regs-gpio.h>
 
 #include <linux/usb/gadget.h>
 #include <linux/fsa9480.h>
@@ -1638,6 +1639,17 @@ static struct platform_device s3c_device_i2c14 = {
 	.dev.platform_data	= &i2c14_platdata,
 };
 
+// set up a (hopefully) better interrupt filter
+void touch_key_set_int_flt( unsigned long width )
+{
+  writel( readl(S5PV210_GPJ4_INT_FLTCON0) |
+            (1 << 15) | // enable bit
+            (width << 8), // max width = 0x2f
+            S5PV210_GPJ4_INT_FLTCON0 );
+}
+
+const unsigned long touch_int_flt_width = 0x2f;   // arbitrary value - max is 0x2f
+
 static void touch_keypad_gpio_init(void)
 {
 	int ret = 0;
@@ -1645,6 +1657,8 @@ static void touch_keypad_gpio_init(void)
 	ret = gpio_request(_3_GPIO_TOUCH_EN, "TOUCH_EN");
 	if (ret)
 		printk(KERN_ERR "Failed to request gpio touch_en.\n");
+		
+	touch_key_set_int_flt( touch_int_flt_width );				
 }
 
 static void touch_keypad_onoff(int onoff)
@@ -1655,7 +1669,7 @@ static void touch_keypad_onoff(int onoff)
 #ifdef CONFIG_MACH_ATLAS_EH03
 		msleep(250);
 #else
-		msleep(30);
+		msleep(200);
 #endif
 	else
 #ifdef CONFIG_MACH_ATLAS_EH03
@@ -3789,6 +3803,7 @@ static void __init atlas_machine_init(void)
 	setup_ram_console_mem();
 	s3c_usb_set_serial();
 	platform_add_devices(atlas_devices, ARRAY_SIZE(atlas_devices));
+	printk("%s atlas init \n", __func__);
 
 	/* Find out S5PC110 chip version */
 	_hw_version_check();
