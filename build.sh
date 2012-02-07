@@ -15,7 +15,8 @@ set -e
 # VARIABLE INITIALIZATIONS #
 ############################
 # Toolchain paths
-TOOLCHAIN=/home/vb/toolchain/arm-2011.03/bin
+#TOOLCHAIN=/home/vb/toolchain/arm-2011.03/bin
+TOOLCHAIN=/opt/arm-2010.09/bin
 TOOLCHAIN_PREFIX=arm-none-linux-gnueabi-
 STRIP=${TOOLCHAIN}/${TOOLCHAIN_PREFIX}strip
 
@@ -167,10 +168,10 @@ makezip $KERNEL_VERSION
 makeodin $KERNEL_VERSION
 
 # If you are not me, this ain't here kthx >;]
-if [ -d /mnt/vbs ]; then
-	cp -f "${OUTDIR}/${KERNEL_VERSION}.tar.md5" /mnt/vbs/
-	cp -f "${OUTDIR}/${KERNEL_VERSION}.zip" /mnt/vbs/
-	makeodin "KGB-${TARGET}-${DATE}"
+# put a copy in the dropbox so it shows up on the phone. 
+if [ -d ~/Dropbox/android/kgb ]; then
+  cp -f "${OUTDIR}/${KERNEL_VERSION}.zip" ~/Dropbox/android/kgb/cwm
+  cp -f "${OUTDIR}/${KERNEL_VERSION}.tar.md5" ~/Dropbox/android/kgb/odin
 fi
 
 #######
@@ -184,4 +185,5 @@ TIME_DIFF=$(($END_TIME_SEC - $START_TIME_SEC))
 
 echo "Build script exiting on $(date -R). Elapsed time: $(($TIME_DIFF / 60))m$(($TIME_DIFF % 60))s"
 
-exit
+# don't exit in case we're in a shell 
+# exit

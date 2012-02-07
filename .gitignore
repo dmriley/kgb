@@ -81,3 +81,6 @@ GTAGS
 
 # KGB Kernel buildlog files
 KGB-I500-*.buildlog.txt
+KGB-*.buildlog.txt
+KGB-*.builderrlog.txt
+

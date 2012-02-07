@@ -277,6 +277,7 @@ static irqreturn_t touchkey_interrupt_thread(int irq, void *touchkey_devdata) {
 	struct cypress_touchkey_devdata *devdata = touchkey_devdata;
 	static u8 last_data;
 	static unsigned long thread_count = 0;
+	unsigned long filter_value;
   struct irq_desc *desc = irq_to_desc(irq);
   
   thread_count++;
@@ -285,16 +286,20 @@ static irqreturn_t touchkey_interrupt_thread(int irq, void *touchkey_devdata) {
   for(i=0;i<5;i++){
     ret += gpio_get_value(_3_GPIO_TOUCH_INT);
   }
+  filter_value  = readl(S5PV210_GPJ4_INT_FLTCON0);
   
 	// if the input pin is not zero then it wasn't really an int from the chip. ignore the int. 
   if(ret){ 
   	printk("%s:%d ignoring bad interrupt with _3_GPIO_TOUCH_INT = %01x; thread_count = %u\n", __func__,  __LINE__, ret, thread_count);
-    printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x; interrupt_handle_count = %d; thread_count = %u\n",
-           __func__,  __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), interrupt_handle_count, thread_count );
-    // interrupt re-enable
+	  if (!(filter_value & 0x0000ff00)){
+	    printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x thread_count = %u\n",  __func__, __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), thread_count);
+	  }
 		desc->status &= ~(IRQ_MASKED | IRQ_ONESHOT);
 		desc->chip->unmask(irq);
-    printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\nif(ret) touchkey \n",__func__, __LINE__, desc->status & IRQ_ONESHOT);
+		if(desc->status & IRQ_ONESHOT){
+		  printk("%s:%d desc->status &= IRQ_ONESHOT = %08x; thread_count = %u\n",__func__, __LINE__, desc->status & IRQ_ONESHOT, thread_count);
+		}
+//    printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\n",__func__, __LINE__, desc->status & IRQ_ONESHOT);
     return IRQ_HANDLED;
   }
   // read the byte from the cypress cip
@@ -306,12 +311,12 @@ static irqreturn_t touchkey_interrupt_thread(int irq, void *touchkey_devdata) {
     case 0x1: case 0x2: case 0x3: case 0x4: case 0x9: case 0xa: case 0xb: case 0xc:
       goto PROCESS;
     default:
-      // the risk is that emi caused a valid keypress to be read wrong and now we're ignoring it.  
+/*      // the risk is that emi caused a valid keypress to be read wrong and now we're ignoring it.  
   	  printk("%s:%d bad i2c read data: %02x; thread_count = %u\n", __func__,  __LINE__, data, thread_count);
   	    //print out value of  S5PV210_GPJ4_INT_FLTCON0     
-      printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x; interrupt_handle_count = %d thread_count = %u\n",
-             __func__, __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), interrupt_handle_count, thread_count );
-      
+  	  if (!(filter_value & 0x0000ff00)){
+  	    printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x; thread_count = %u\n", __func__, __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), thread_count );
+  	  }
       // if the last event was key down then this may have been a key up event with damaged data.
       // if a valid read and the value is not all 1 or 0 then correct the data to be the key up value.
       if ((data != 0) && (data != 255)){
@@ -321,7 +326,7 @@ static irqreturn_t touchkey_interrupt_thread(int irq, void *touchkey_devdata) {
           goto PROCESS;
         } 
         
-      } 
+      } */
       printk("%s:%d bad data ignore touchkey \n",__func__, __LINE__);
       goto exit_thread;
     
@@ -371,7 +376,10 @@ err:
 exit_thread:  
 		desc->status &= ~(IRQ_MASKED | IRQ_ONESHOT);
     desc->chip->unmask(irq);
-    printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\n",__func__, __LINE__, desc->status & IRQ_ONESHOT);
+    // if IRQ_ONESHOT did not get cleared, print the error
+    if (desc->status & IRQ_ONESHOT){
+      printk("%s:%d notice: desc->status &= IRQ_ONESHOT = %08x thread count = %d\n",__func__, __LINE__, desc->status & IRQ_ONESHOT, thread_count);
+    }
 	
 	return IRQ_HANDLED;
 }
@@ -389,12 +397,17 @@ static irqreturn_t touchkey_interrupt_handler(int irq, void *touchkey_devdata) {
   }
 	// if the input pin is not zero then it wasn't really an int from the chip. ignore the int. 
   if(ret){ 
-	  printk("%s:%d ignoring bad interrupt with _3_GPIO_TOUCH_INT = %d\n", __func__,  __LINE__,ret);
-    printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x; interrupt_handle_count = %d\n", __func__, __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), interrupt_handle_count );
+	  printk("%s:%d ignoring bad interrupt with _3_GPIO_TOUCH_INT = %d interrupt_handle_count = %d\n", __func__,  __LINE__, ret, interrupt_handle_count);
+	  // check readl(S5PV210_GPJ4_INT_FLTCON0) so see if it lost it's value
+	  if (!(readl(S5PV210_GPJ4_INT_FLTCON0) & 0x0000ff00)){
+	    printk("%s:%d S5PV210_GPJ4_INT_FLTCON0 = %08x; interrupt_handle_count = %d\n", __func__, __LINE__, readl(S5PV210_GPJ4_INT_FLTCON0), interrupt_handle_count );
+	  }
     // it's possible that the interrupt happened just after the unmask in the thread with a bad keycode or bad interrupt. 
     // need to clear oneshot
 		desc->status &= ~(IRQ_MASKED | IRQ_ONESHOT);
-    printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\n",__func__, __LINE__, desc->status & IRQ_ONESHOT);
+		if(desc->status & IRQ_ONESHOT){
+		  printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\n",__func__, __LINE__, desc->status & IRQ_ONESHOT);
+		}
      
     return IRQ_HANDLED;
   }
@@ -406,7 +419,6 @@ static irqreturn_t touchkey_interrupt_handler(int irq, void *touchkey_devdata) {
 	}
   
   // the irq thread will run. let it re-enable the interrupt when done. 
-  printk("%s:%d desc->status |= IRQ_ONESHOT\n", __func__,  __LINE__);
   desc->status |= IRQ_ONESHOT;
   printk("%s:%d desc->status &= IRQ_ONESHOT = %08x\n",__func__,  __LINE__, desc->status & IRQ_ONESHOT);
 
