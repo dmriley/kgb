@@ -306,6 +306,9 @@ static irqreturn_t touchkey_interrupt_thread(int irq, void *touchkey_devdata) {
 	    }
       goto PROCESS;
     case 0x9: case 0xa: case 0xb: case 0xc:
+      if(data == last_touchkey_value){
+      	goto exit_thread; // don't send another up event. it's bogus. 
+      }
       goto PROCESS;
     default:
       printk("%s:%d bad data %02x; key ignore. ret = %04x thread count = %u\n",__func__, __LINE__, data, ret, thread_count);
